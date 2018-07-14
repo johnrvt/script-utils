@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""
+Lock the screen when the laptop lid is closed.
+
+The screen is locked if the active display output is the laptop
+device and only if there are no other active outputs.
+
+Inspired from dbus-hooks of lexelby:
+https://gist.github.com/lexelby/1c5066c2bdcaf1235b6b
+
+
+Copyright (c) 2018  Jonathan Ravat
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+"""
+import dbus
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+
+DC_CURRENT_CRTC = 2
+DC_PROPERTIES = 7
+
+
+class LockOnLidClose(object):
+    def __init__(self):
+        DBusGMainLoop(set_as_default=True)
+
+        self.system_bus = dbus.SystemBus()
+        self.session_bus = dbus.SessionBus()
+
+        self.system_bus.add_signal_receiver(
+            self.handles,
+            signal_name="PropertiesChanged",
+            dbus_interface="org.freedesktop.DBus.Properties",
+            path="/org/freedesktop/UPower",
+        )
+        self.session_bus.add_signal_receiver(
+            self.handles,
+            signal_name="MonitorsChanged",
+            dbus_interface="org.gnome.Mutter.DisplayConfig",
+            path="/org/gnome/Mutter/DisplayConfig",
+        )
+
+        loop = GLib.MainLoop()
+        loop.run()
+
+    def handles(self, *_args):
+        if self.should_lock_screen():
+            self.lock_screen()
+
+    def lid_is_closed(self):
+        upower = self.system_bus.get_object("org.freedesktop.UPower",
+                                            "/org/freedesktop/UPower")
+        props = upower.GetAll("org.freedesktop.UPower",
+                              dbus_interface="org.freedesktop.DBus.Properties")
+        return props['LidIsPresent'] and props['LidIsClosed']
+
+    def get_display_outputs(self):
+        # Reference: https://github.com/GNOME/mutter/blob/master/src/org.gnome.Mutter.DisplayConfig.xml
+        display_config = self.session_bus.get_object(
+            "org.gnome.Mutter.DisplayConfig",
+            "/org/gnome/Mutter/DisplayConfig"
+        )
+        resources = display_config.GetResources(
+            dbus_interface="org.gnome.Mutter.DisplayConfig"
+        )
+        return resources[2]
+
+    def should_lock_screen(self):
+        if not self.lid_is_closed():
+            return False
+
+        outputs = self.get_display_outputs()
+
+        n_output_on = 0
+        laptop_on = False
+        for output in outputs:
+            if output[DC_CURRENT_CRTC] != -1:
+                n_output_on += 1
+                if output[DC_PROPERTIES]['connector-type'] == 'eDP':
+                    laptop_on = True
+
+        return laptop_on and n_output_on == 1
+
+    def lock_screen(self):
+        screensaver_obj = self.session_bus.get_object(
+            "org.gnome.ScreenSaver",
+            "/org/gnome/ScreenSaver"
+        )
+        screensaver_int = dbus.Interface(
+            screensaver_obj,
+            dbus_interface="org.gnome.ScreenSaver"
+        )
+
+        if not screensaver_int.GetActive():
+            screensaver_int.Lock(
+                reply_handler=lambda *_: None,
+                error_handler=lambda _: None
+            )
+
+
+if __name__ == "__main__":
+    LockOnLidClose()
